@@ -15,7 +15,7 @@ from agent_core import (
     AnalyticsAgent
 )
 from notifier import send_telegram_alert
-from telegram_bot import register_job_for_interaction, listen_for_telegram_clicks
+import telegram_bot
 
 # Initialize DB
 database.init_db()
@@ -33,7 +33,17 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    print(f"[KEEP-ALIVE] Health check server listening on port {port}")
     server.serve_forever()
+
+# Helper to dynamically find telegram listener function
+def start_telegram_listener():
+    if hasattr(telegram_bot, "listen_for_telegram_clicks"):
+        telegram_bot.listen_for_telegram_clicks()
+    elif hasattr(telegram_bot, "run_bot_listener"):
+        telegram_bot.run_bot_listener()
+    elif hasattr(telegram_bot, "start_bot"):
+        telegram_bot.start_bot()
 
 # ==========================================
 # 2. JOB PROCESSING PIPELINE
@@ -44,12 +54,16 @@ def process_scouted_job(job: dict):
     apply_link = job.get("apply_link", "")
     description = job.get("description", "")
 
-    # Duplicate Guard
-    if database.is_already_applied(company, position):
+    # Duplicate Guard (Blocks identical listing, permits fresh roles)
+    if database.is_already_applied(company, position, apply_link):
         return
 
-    # ATS Match & Evaluation (Gemini 2.5 Flash)
-    eval_result = MatchmakerAgent.evaluate_job(position, description)
+    # ATS Match & Evaluation (Gemini)
+    try:
+        eval_result = MatchmakerAgent.evaluate_job(position, description)
+    except Exception as err:
+        print(f"[EVALUATION ERROR] {company} - {position}: {err}")
+        return
 
     # Filter Non-Matching Jobs (< 65%)
     if not eval_result.apply_verdict or eval_result.match_score < 65.0:
@@ -58,16 +72,17 @@ def process_scouted_job(job: dict):
 
     # Register Job for 1-Click Remote Trigger
     job_id = str(uuid.uuid4())[:8]
-    register_job_for_interaction(job_id, {
-        "company": company,
-        "position": position,
-        "apply_link": apply_link,
-        "role": eval_result.selected_role
-    })
+    if hasattr(telegram_bot, "register_job_for_interaction"):
+        telegram_bot.register_job_for_interaction(job_id, {
+            "company": company,
+            "position": position,
+            "apply_link": apply_link,
+            "role": eval_result.selected_role
+        })
 
-    # Method A: Cold Outreach Email (If genuine recruiter email exists)
+    # Method A: Cold Outreach Email (If recruiter email exists)
     recruiter_email = job.get("recruiter_email")
-    if SecurityVerificationAgent.validate_contact_email(recruiter_email):
+    if recruiter_email and SecurityVerificationAgent.validate_contact_email(recruiter_email):
         try:
             sent = ApplicationAgent.dispatch_email_application(
                 company=company,
@@ -81,12 +96,14 @@ def process_scouted_job(job: dict):
                     company=company,
                     position=position,
                     platform="Direct Cold Email",
+                    score=eval_result.match_score,
+                    status="DISPATCHED",
+                    job_url=apply_link,
                     email=recruiter_email,
-                    role=eval_result.selected_role,
-                    score=eval_result.match_score
+                    role=eval_result.selected_role
                 )
                 print(f"[APPLIED VIA EMAIL] {company} - {position}")
-                send_telegram_alert(company, position, eval_result.match_score, "Cold Email Dispatched + Resume Attached ✉️", apply_link, job_id)
+                send_telegram_alert(company, position, eval_result.match_score, f"Cold Email Sent to {recruiter_email} ✉️", apply_link, job_id)
                 return
         except Exception as e:
             print(f"[EMAIL ERROR] {e}")
@@ -96,12 +113,21 @@ def process_scouted_job(job: dict):
         company=company,
         position=position,
         platform="LinkedIn 1-Click",
+        score=eval_result.match_score,
+        status="NOTIFIED",
+        job_url=apply_link,
         email="N/A",
-        role=eval_result.selected_role,
-        score=eval_result.match_score
+        role=eval_result.selected_role
     )
     print(f"[MATCH FOUND] Alerting for {company} - {position}")
-    send_telegram_alert(company, position, eval_result.match_score, "Qualified Opportunity (Tap below to Auto-Apply) ⚡", apply_link, job_id)
+    send_telegram_alert(
+        company=company,
+        position=position,
+        match_score=eval_result.match_score,
+        reason=f"Top ATS Match ({eval_result.match_score}%) ⚡",
+        apply_link=apply_link,
+        job_id=job_id
+    )
 
 def run_job_scout_pipeline():
     print(f"\n--- Running Job Scout Pipeline: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
@@ -121,7 +147,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_health_server, daemon=True).start()
     
     # 2. Start Telegram 1-Click Button Listener Thread
-    threading.Thread(target=listen_for_telegram_clicks, daemon=True).start()
+    threading.Thread(target=start_telegram_listener, daemon=True).start()
     
     # 3. Run first job scout round immediately
     run_job_scout_pipeline()

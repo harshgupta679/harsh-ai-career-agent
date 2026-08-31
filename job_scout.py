@@ -1,7 +1,7 @@
 import os
 import requests
 from bs4 import BeautifulSoup
-from database import is_job_applied, log_application
+from database import is_already_applied, log_application
 from agent_core import MatchmakerAgent, SecurityVerificationAgent, ApplicationAgent
 from notifier import send_telegram_alert
 from telegram_bot import register_job_for_interaction
@@ -26,7 +26,7 @@ def scout_jobs_for_role(role_keyword: str):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code != 200:
-            print(f"[JOB SCOUT] LinkedIn returned status: {response.status_code}")
+            print(f"[JOB SCOUT] LinkedIn status: {response.status_code}")
             return
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -42,16 +42,14 @@ def scout_jobs_for_role(role_keyword: str):
 
             position = title_tag.get_text(strip=True)
             company = company_tag.get_text(strip=True)
-            apply_link = link_tag.get("href", "").split("?")[0]
+            raw_link = link_tag.get("href", "")
+            apply_link = raw_link.split("?")[0].strip()
 
-            # --- DEDUPLICATION CHECK (Never Repeat Same Job) ---
-            if is_job_applied(company, position) or is_job_applied(company, apply_link):
+            if is_already_applied(company, position, apply_link):
                 continue
 
-            # Fetch detailed job description
-            desc_text = f"Hiring for {position} at {company}. Strong requirements in data analytics, SQL, Python, machine learning, and visualization tools."
+            desc_text = f"Hiring for {position} at {company}. Key requirements: Python, SQL, data analytics, predictive modeling, machine learning, and visualization dashboards."
             
-            # ATS Scoring via Gemini
             try:
                 eval_result = MatchmakerAgent.evaluate_job(position, desc_text)
             except Exception as e:
@@ -59,25 +57,21 @@ def scout_jobs_for_role(role_keyword: str):
                 continue
 
             if eval_result.apply_verdict and eval_result.match_score >= 65.0:
-                job_id = f"{abs(hash(company + position)) % 1000000}"
-                
-                # Check for direct email
+                job_id = f"{abs(hash(apply_link)) % 1000000}"
                 recruiter_email = extract_recruiter_email(desc_text)
                 
                 if recruiter_email:
-                    # Auto Cold Email
                     ApplicationAgent.dispatch_email_application(company, position, recruiter_email, desc_text, eval_result.selected_role)
-                    log_application(company, position, "Cold Email", eval_result.match_score, "DISPATCHED")
+                    log_application(company, position, "Cold Email", eval_result.match_score, "DISPATCHED", apply_link, recruiter_email, eval_result.selected_role)
                     send_telegram_alert(
                         company=company,
                         position=position,
                         match_score=eval_result.match_score,
-                        reason=f"Cold Email + Tailored Resume Sent to {recruiter_email}",
+                        reason=f"Cold Email + Resume Sent to {recruiter_email}",
                         apply_link=apply_link,
                         job_id=job_id
                     )
                 else:
-                    # Register for 1-Click Interactive Telegram Apply
                     register_job_for_interaction(job_id, {
                         "company": company,
                         "position": position,
@@ -85,15 +79,13 @@ def scout_jobs_for_role(role_keyword: str):
                         "role": eval_result.selected_role
                     })
                     
-                    # Mark in DB immediately so it never repeats
-                    log_application(company, position, "LinkedIn EasyApply Alert", eval_result.match_score, "NOTIFIED")
+                    log_application(company, position, "LinkedIn EasyApply Alert", eval_result.match_score, "NOTIFIED", apply_link, "", eval_result.selected_role)
                     
-                    # Send Telegram Alert with 1-Click Apply Button
                     send_telegram_alert(
                         company=company,
                         position=position,
                         match_score=eval_result.match_score,
-                        reason=f"Top ATS Match ({', '.join(eval_result.missing_skills) if eval_result.missing_skills else 'Strong Fit'})",
+                        reason=f"ATS Score {eval_result.match_score}% - Top Match",
                         apply_link=apply_link,
                         job_id=job_id
                     )
@@ -104,3 +96,6 @@ def scout_jobs_for_role(role_keyword: str):
 def run_job_scout_pipeline():
     for role in TARGET_ROLES:
         scout_jobs_for_role(role)
+
+# Aliases for cross-compatibility
+fetch_live_jobs = run_job_scout_pipeline
