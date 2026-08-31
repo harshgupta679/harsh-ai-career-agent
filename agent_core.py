@@ -13,6 +13,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Absolute paths for resumes
 RESUME_MAPPING = {
@@ -60,7 +61,7 @@ Analyze match and return JSON strictly matching schema:
 - missing_skills: list of missing tools/skills
 """
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=GEMINI_MODEL,
             contents=prompt,
             config={
                 "response_mime_type": "application/json",
@@ -91,11 +92,11 @@ Candidate Profile (Harsh Gupta):
 
 Email Writing Guidelines:
 1. Subject Line: Must be clean and corporate (e.g., "Application for {position} - Harsh Gupta").
-2. Tone: Confident, polite, concise (under 160 words). No robotic/overly formal cliches (avoid "I hope this email finds you well").
-3. Paragraph 1: State interest in the specific {position} role at {company} and direct alignment with their core tech stack.
-4. Paragraph 2: Mention 2-3 specific technical capabilities directly addressing the job requirements (e.g., predictive modeling, SQL optimization, KPI tracking, AI agents).
-5. Paragraph 3: Mention that the resume is attached for review and suggest a brief call to discuss how Harsh can contribute.
-6. Signature: Clean professional corporate block.
+2. Tone: Confident, polite, concise (under 160 words). No robotic/overly formal cliches.
+3. Paragraph 1: State interest in the specific {position} role at {company} and alignment with their core stack.
+4. Paragraph 2: Mention 2-3 specific technical capabilities directly addressing requirements.
+5. Paragraph 3: Mention attached resume and suggest a brief connect.
+6. Signature: Corporate clean format.
 
 Output STRICTLY in this format:
 SUBJECT: <Your Subject Line>
@@ -103,7 +104,7 @@ BODY:
 <Your Full Email Body>
 """
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=GEMINI_MODEL,
             contents=prompt
         )
         text = response.text.strip()
@@ -123,21 +124,17 @@ BODY:
             print("[EMAIL AGENT] Missing email credentials or recipient address.")
             return False
 
-        # 1. Draft Tailored Cold Email
         draft = ApplicationAgent.generate_cold_email(company, position, job_description, role_type)
         
-        # 2. Select Dynamic Resume PDF
         is_ds_role = any(x in role_type.lower() for x in ["scientist", "machine learning", "ai", "ml"])
         resume_path = RESUME_MAPPING["Data Scientist"] if is_ds_role else RESUME_MAPPING["Data Analyst"]
 
-        # 3. Setup MIME Container
         msg = MIMEMultipart()
         msg["From"] = f"Harsh Gupta <{SENDER_EMAIL}>"
         msg["To"] = recipient_email
         msg["Subject"] = draft["subject"]
         msg.attach(MIMEText(draft["body"], "plain"))
 
-        # 4. Attach Resume PDF
         if os.path.exists(resume_path):
             with open(resume_path, "rb") as f:
                 attachment = MIMEBase("application", "pdf")
@@ -152,7 +149,6 @@ BODY:
         else:
             print(f"[EMAIL AGENT WARNING] Resume file not found at: {resume_path}")
 
-        # 5. Dispatch via Gmail SSL
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
                 server.login(SENDER_EMAIL, EMAIL_APP_PASSWORD)
