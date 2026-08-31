@@ -1,4 +1,5 @@
 import os
+import time
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -43,8 +44,10 @@ class SecurityVerificationAgent:
 class MatchmakerAgent:
     @staticmethod
     def evaluate_job(position: str, description: str) -> EvaluationSchema:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        prompt = f"""
+        time.sleep(2)  # Rate-limit buffer
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            prompt = f"""
 Evaluate candidate Harsh Gupta against this job opening.
 
 Candidate Profile:
@@ -60,24 +63,39 @@ Analyze match and return JSON strictly matching schema:
 - selected_role: 'Data Analyst' or 'Data Scientist'
 - missing_skills: list of missing tools/skills
 """
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_schema": EvaluationSchema,
-            }
-        )
-        return EvaluationSchema.model_validate_json(response.text)
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "response_schema": EvaluationSchema,
+                }
+            )
+            return EvaluationSchema.model_validate_json(response.text)
+        except Exception as e:
+            print(f"[GEMINI EVAL ADAPTIVE] Fallback scoring applied: {e}")
+            # Algorithmic fallback to prevent pipeline crash when API limits are reached
+            text = (position + " " + description).lower()
+            keywords = ["python", "sql", "analyst", "data", "tableau", "power bi", "machine learning", "ml"]
+            matches = sum(1 for k in keywords if k in text)
+            score = min(90.0, 52.0 + (matches * 6.0))
+            is_ds = any(k in text for k in ["scientist", "machine learning", "ml", "ai"])
+            return EvaluationSchema(
+                match_score=score,
+                apply_verdict=(score >= 65.0),
+                selected_role="Data Scientist" if is_ds else "Data Analyst",
+                missing_skills=["Cloud Architecture (AWS/GCP)"] if score < 75 else []
+            )
 
 
 # --- 3. Cold Email & Application Agent ---
 class ApplicationAgent:
     @staticmethod
     def generate_cold_email(company: str, position: str, job_description: str, role_type: str) -> dict:
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        prompt = f"""
+        time.sleep(1.5)
+        try:
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            prompt = f"""
 You are Harsh Gupta writing a direct, high-impact job application email to the Hiring Team at {company}.
 Target Position: {position}
 Domain: {role_type}
@@ -103,20 +121,23 @@ SUBJECT: <Your Subject Line>
 BODY:
 <Your Full Email Body>
 """
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt
-        )
-        text = response.text.strip()
-        
-        subject = f"Application for {position} - Harsh Gupta"
-        body = text
-        if "SUBJECT:" in text and "BODY:" in text:
-            parts = text.split("BODY:")
-            subject = parts[0].replace("SUBJECT:", "").strip()
-            body = parts[1].strip()
-            
-        return {"subject": subject, "body": body}
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt
+            )
+            text = response.text.strip()
+            subject = f"Application for {position} - Harsh Gupta"
+            body = text
+            if "SUBJECT:" in text and "BODY:" in text:
+                parts = text.split("BODY:")
+                subject = parts[0].replace("SUBJECT:", "").strip()
+                body = parts[1].strip()
+            return {"subject": subject, "body": body}
+        except Exception:
+            return {
+                "subject": f"Application for {position} - Harsh Gupta",
+                "body": f"Hi Hiring Team,\n\nI am applying for the {position} role at {company}. With hands-on expertise in Python, SQL, data modeling, and {role_type} workflows, I look forward to adding immediate value to your data initiatives.\n\nPlease find my resume attached for review.\n\nBest regards,\nHarsh Gupta\nharshgupta06504@gmail.com"
+            }
 
     @staticmethod
     def dispatch_email_application(company: str, position: str, recipient_email: str, job_description: str = "", role_type: str = "Data Analyst") -> bool:
@@ -125,7 +146,6 @@ BODY:
             return False
 
         draft = ApplicationAgent.generate_cold_email(company, position, job_description, role_type)
-        
         is_ds_role = any(x in role_type.lower() for x in ["scientist", "machine learning", "ai", "ml"])
         resume_path = RESUME_MAPPING["Data Scientist"] if is_ds_role else RESUME_MAPPING["Data Analyst"]
 
