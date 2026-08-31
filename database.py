@@ -1,5 +1,6 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import List, Union
 
 DB_NAME = "career_agent.db"
 
@@ -39,19 +40,22 @@ def init_db():
 def is_already_applied(company: str, position: str) -> bool:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM applications WHERE LOWER(company_name) = LOWER(?) AND LOWER(position) = LOWER(?)", (company, position))
+    cursor.execute(
+        "SELECT 1 FROM applications WHERE LOWER(company_name) = LOWER(?) AND LOWER(position) = LOWER(?)", 
+        (company.strip(), position.strip())
+    )
     exists = cursor.fetchone() is not None
     conn.close()
     return exists
 
-def log_application(company: str, position: str, platform: str, email: str, role: str, score: float):
+def log_application(company: str, position: str, platform: str, email: str, role: str, score: float) -> bool:
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     try:
         cursor.execute('''
             INSERT INTO applications (company_name, position, platform, contact_email, applied_resume_role, match_score, applied_at, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (company, position, platform, email, role, score, datetime.now(), "Applied"))
+        ''', (company.strip(), position.strip(), platform, email, role, score, datetime.now(), "Applied"))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -59,14 +63,20 @@ def log_application(company: str, position: str, platform: str, email: str, role
     finally:
         conn.close()
 
-def log_skill_gap(job_title: str, company: str, missing_skills: list):
+def log_skill_gap(job_title: str, company: str, missing_skills: Union[List[str], str]):
     if not missing_skills:
         return
+    
+    if isinstance(missing_skills, list):
+        skills_str = ", ".join(missing_skills)
+    else:
+        skills_str = str(missing_skills)
+
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute('''
         INSERT INTO skill_gap_logs (job_title, company, missing_skills, recorded_at)
         VALUES (?, ?, ?, ?)
-    ''', (job_title, company, ", ".join(missing_skills), datetime.now()))
+    ''', (job_title.strip(), company.strip(), skills_str, datetime.now()))
     conn.commit()
     conn.close()

@@ -1,162 +1,117 @@
-import os
-import smtplib
-import sqlite3
-from email.message import EmailMessage
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+import time
+import uuid
+import schedule
+from datetime import datetime
 
-from google import genai
-from google.genai import types
+import database
+from job_scout import fetch_live_jobs
+from agent_core import (
+    SecurityVerificationAgent,
+    MatchmakerAgent,
+    ApplicationAgent,
+    AnalyticsAgent
+)
+from notifier import send_telegram_alert
+from telegram_bot import register_job_for_interaction
 
-load_dotenv()
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Optional Playwright Easy Apply integration
+try:
+    from playwright_applier import LinkedInEasyApplyAgent
+    PLAYWRIGHT_INSTALLED = True
+except ImportError:
+    PLAYWRIGHT_INSTALLED = False
 
-# Candidate Details
-CANDIDATE_NAME = "Harsh Gupta"
-CANDIDATE_PHONE = "+91 7906936146"
-LINKEDIN_URL = "https://www.linkedin.com/in/harsh-gupta-09031830a/"
-RESUME_PATHS = {
-    "Data Analyst": "Harsh_Gupta_Resume_DataAnalyst.pdf",
-    "Data Scientist": "Harsh_Gupta_Resume_DataScientist.pdf"
-}
+# Initialize SQLite database
+database.init_db()
 
-# ----------------- SECURITY & VALIDATION AGENT -----------------
-class SecurityAgent:
-    @staticmethod
-    def sanitize_input(text: str) -> str:
-        """Strips injection payloads and suspicious script characters."""
-        disallowed = ["<script>", "</script>", "DROP TABLE", "--", "exec("]
-        for item in disallowed:
-            text = text.replace(item, "")
-        return text.strip()
+def process_scouted_job(job: dict):
+    company = job["company"]
+    position = job["position"]
+    apply_link = job.get("apply_link", "")
 
-    @staticmethod
-    def is_valid_email(email: str) -> bool:
-        """Validates genuine recruiter/company email address format."""
-        import re
-        regex = r"^[\w\.-]+@[\w\.-]+\.\w+$"
-        return bool(re.match(regex, email))
+    # 1. Anti-Spam / Prevent Duplicate Applications
+    if database.is_already_applied(company, position):
+        print(f"[SKIPPED] {company} - {position}: Already processed in database.")
+        return
 
-# ----------------- APPLICATION & MATCHING AGENT -----------------
-class ApplicationAgent:
-    @staticmethod
-    def evaluate_fit(job_title: str, job_description: str):
-        """Uses Gemini to score alignment, select resume, and identify skill gaps."""
-        prompt = f"""
-        You are an ATS Matchmaker. Analyze this job description for Harsh Gupta.
-        Job Title: {job_title}
-        Job Description: {job_description}
+    # 2. ATS Match & Skill Gap Evaluation (Gemini 2.5 Flash)
+    eval_result = MatchmakerAgent.evaluate_job(position, job["description"])
 
-        Candidate Profile:
-        - B.Tech IT (2022-2026), Bharat Institute of Technology
-        - Roles Available: 'Data Analyst' or 'Data Scientist'
-        - Skills: Python, SQL, Pandas, NumPy, Scikit-Learn, EDA, Data Pipelines, Anomaly Detection.
-        - Learning: Power BI, Tableau, GCP.
+    # 3. Filter by Match Score (>= 65%)
+    if not eval_result.apply_verdict or eval_result.match_score < 65.0:
+        print(f"[REJECTED] {company} - {position} | Score: {eval_result.match_score}% | Missing: {eval_result.missing_skills}")
+        database.log_skill_gap(position, company, eval_result.missing_skills)
+        return
 
-        Respond in this exact YAML format:
-        ROLE: <Data Analyst or Data Scientist or None>
-        SCORE: <0 to 100>
-        FIT: <YES or NO> (YES only if SCORE >= 65)
-        MISSING_SKILLS: <comma-separated list of missing skills or None>
-        """
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
+    # 4. Generate Interactive Job ID for Telegram Remote Control
+    job_id = str(uuid.uuid4())[:8]
+    register_job_for_interaction(job_id, {
+        "company": company,
+        "position": position,
+        "apply_link": apply_link,
+        "role": eval_result.selected_role
+    })
+
+    # 5. Method A: Direct Cold Email Outreach (with PDF Resume Attachment)
+    recruiter_email = job.get("recruiter_email")
+    if SecurityVerificationAgent.validate_contact_email(recruiter_email):
+        sent = ApplicationAgent.dispatch_email_application(
+            company=company,
+            position=position,
+            recipient_email=recruiter_email,
+            job_description=job["description"],
+            role_type=eval_result.selected_role
         )
-        return response.text
+        if sent:
+            database.log_application(
+                company=company,
+                position=position,
+                platform="Direct Cold Email",
+                email=recruiter_email,
+                role=eval_result.selected_role,
+                score=eval_result.match_score
+            )
+            print(f"[APPLIED VIA EMAIL] Sent {eval_result.selected_role} application to {company} ({recruiter_email}) - Score: {eval_result.match_score}%")
+            send_telegram_alert(company, position, eval_result.match_score, "Cold Email Dispatched + Resume Attached ✉️", apply_link, job_id)
+            return
 
-    @staticmethod
-    def send_application_email(recipient_email: str, company: str, job_title: str, selected_role: str):
-        """Builds custom cold outreach email and attaches the selected resume."""
-        sender_email = os.getenv("SENDER_EMAIL")
-        app_pwd = os.getenv("EMAIL_APP_PASSWORD")
-        resume_file = RESUME_PATHS.get(selected_role)
+    # 6. Method B: Telegram 1-Click Remote Trigger & Easy Apply Alert
+    database.log_application(
+        company=company,
+        position=position,
+        platform="LinkedIn 1-Click",
+        email="N/A",
+        role=eval_result.selected_role,
+        score=eval_result.match_score
+    )
+    print(f"[MATCH FOUND] {company} - {position} qualifies ({eval_result.match_score}%). Alerting Telegram.")
+    send_telegram_alert(company, position, eval_result.match_score, "Qualified Match (Tap below to Auto-Apply) ⚡", apply_link, job_id)
 
-        msg = EmailMessage()
-        msg['Subject'] = f"Application for {job_title} Role - Harsh Gupta"
-        msg['From'] = sender_email
-        msg['To'] = recipient_email
+def run_job_scout_pipeline():
+    print(f"\n==========================================")
+    print(f"Running Job Pipeline: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"==========================================")
+    
+    live_jobs = fetch_live_jobs()
+    print(f"Scouted {len(live_jobs)} fresh listings.")
+    
+    for job in live_jobs:
+        process_scouted_job(job)
 
-        body = f"""Dear Hiring Team at {company},
+# ----------------- SCHEDULER -----------------
+# Scout every 2 hours for fresh postings
+schedule.every(2).hours.do(run_job_scout_pipeline)
 
-I am writing to express my interest in the {job_title} position. 
+# Email monthly market report every 30 days
+schedule.every(30).days.do(AnalyticsAgent.generate_and_send_monthly_report)
 
-I am a final-year B.Tech Information Technology student with practical experience building automated data transformation pipelines, exploratory data analysis, and statistical anomaly detection models using Python and SQL.
+if __name__ == "__main__":
+    print("AI Career Agent Master Pipeline Initialized...")
+    
+    # Run immediate first cycle on startup
+    run_job_scout_pipeline()
 
-Key Highlights:
-- Built automation scripts reducing data preprocessing time by ~40%.
-- Engineered statistical anomaly models validating 10,000+ records.
-- Technical Toolkit: Python (Pandas, NumPy, Scikit-Learn), SQL, Data Cleaning & EDA.
-
-LinkedIn Profile: {LINKEDIN_URL}
-My resume is attached for your review. I would welcome the opportunity to discuss how my skillset aligns with your team's objectives.
-
-Best regards,
-Harsh Gupta
-{CANDIDATE_PHONE}
-"""
-        msg.set_content(body)
-
-        # Attach corresponding resume
-        if os.path.exists(resume_file):
-            with open(resume_file, 'rb') as f:
-                file_data = f.read()
-                msg.add_attachment(file_data, maintype='application', subtype='pdf', filename=resume_file)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(sender_email, app_pwd)
-            smtp.send_message(msg)
-
-# ----------------- MONTHLY ANALYTICS & LEARNING AGENT -----------------
-class AnalyticsAgent:
-    @staticmethod
-    def generate_monthly_report():
-        """Aggregates applications and missing skills to send monthly feedback report."""
-        conn = sqlite3.connect("job_agent_system.db")
-        cursor = conn.cursor()
-        
-        one_month_ago = datetime.now() - timedelta(days=30)
-        cursor.execute("SELECT company_name, position, platform, match_score, applied_at FROM applications WHERE applied_at >= ?", (one_month_ago,))
-        apps = cursor.fetchall()
-        
-        cursor.execute("SELECT missing_skills FROM skill_gap_logs WHERE recorded_at >= ?", (one_month_ago,))
-        gaps = cursor.fetchall()
-        conn.close()
-
-        skill_frequency = {}
-        for row in gaps:
-            if row[0] and row[0] != "None":
-                for skill in row[0].split(','):
-                    s = skill.strip()
-                    skill_frequency[s] = skill_frequency.get(s, 0) + 1
-
-        # Synthesize report with Gemini
-        analysis_prompt = f"""
-        Analyze this month's job hunting statistics for Harsh Gupta:
-        - Total Applications Sent: {len(apps)}
-        - Frequently Missing Skills in Job Market: {skill_frequency}
-
-        Produce an executive monthly intelligence report covering:
-        1. Application Summary.
-        2. Top 3 In-Demand Skills to Learn next to improve conversion rates.
-        3. Strategic Action Plan for the upcoming month.
-        """
-        report_content = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=analysis_prompt
-        ).text
-
-        # Send report
-        sender_email = os.getenv("SENDER_EMAIL")
-        app_pwd = os.getenv("EMAIL_APP_PASSWORD")
-        target_email = os.getenv("MONTHLY_REPORT_RECEIVER", "cryptomarketanalysis12@gmail.com")
-
-        msg = EmailMessage()
-        msg['Subject'] = f"Monthly Career Agent Intelligence Report - {datetime.now().strftime('%B %Y')}"
-        msg['From'] = sender_email
-        msg['To'] = target_email
-        msg.set_content(report_content)
-
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-            smtp.login(sender_email, app_pwd)
-            smtp.send_message(msg)
+    # Continuous background listener
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
