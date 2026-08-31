@@ -60,7 +60,7 @@ Analyze match and return JSON strictly matching schema:
 - missing_skills: list of missing tools/skills
 """
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash"
             contents=prompt,
             config={
                 "response_mime_type": "application/json",
@@ -103,7 +103,7 @@ BODY:
 <Your Full Email Body>
 """
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.6-flash"
             contents=prompt
         )
         text = response.text.strip()
