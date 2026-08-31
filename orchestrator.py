@@ -17,11 +17,11 @@ from agent_core import (
 from notifier import send_telegram_alert
 import telegram_bot
 
-# Initialize DB
+# Initialize Database
 database.init_db()
 
 # ==========================================
-# 1. 24/7 KEEP-ALIVE SERVER (For Render)
+# 1. 24/7 HEALTH & KEEP-ALIVE SERVER
 # ==========================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -30,20 +30,30 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"AI Career Agent & Telegram Controller Active 24/7.")
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     print(f"[KEEP-ALIVE] Health check server listening on port {port}")
     server.serve_forever()
 
-# Helper to dynamically find telegram listener function
 def start_telegram_listener():
-    if hasattr(telegram_bot, "listen_for_telegram_clicks"):
-        telegram_bot.listen_for_telegram_clicks()
-    elif hasattr(telegram_bot, "run_bot_listener"):
-        telegram_bot.run_bot_listener()
-    elif hasattr(telegram_bot, "start_bot"):
-        telegram_bot.start_bot()
+    try:
+        if hasattr(telegram_bot, "listen_for_telegram_clicks"):
+            telegram_bot.listen_for_telegram_clicks()
+        elif hasattr(telegram_bot, "run_bot_listener"):
+            telegram_bot.run_bot_listener()
+        elif hasattr(telegram_bot, "start_bot"):
+            telegram_bot.start_bot()
+    except Exception as err:
+        print(f"[TELEGRAM CONTROLLER ERROR] {err}")
 
 # ==========================================
 # 2. JOB PROCESSING PIPELINE
@@ -54,11 +64,11 @@ def process_scouted_job(job: dict):
     apply_link = job.get("apply_link", "")
     description = job.get("description", "")
 
-    # Duplicate Guard (Blocks identical listing, permits fresh roles)
+    # Duplicate Guard
     if database.is_already_applied(company, position, apply_link):
         return
 
-    # ATS Match & Evaluation (Gemini)
+    # ATS Match & Evaluation
     try:
         eval_result = MatchmakerAgent.evaluate_job(position, description)
     except Exception as err:
@@ -80,7 +90,7 @@ def process_scouted_job(job: dict):
             "role": eval_result.selected_role
         })
 
-    # Method A: Cold Outreach Email (If recruiter email exists)
+    # Method A: Cold Outreach Email
     recruiter_email = job.get("recruiter_email")
     if recruiter_email and SecurityVerificationAgent.validate_contact_email(recruiter_email):
         try:
@@ -131,28 +141,35 @@ def process_scouted_job(job: dict):
 
 def run_job_scout_pipeline():
     print(f"\n--- Running Job Scout Pipeline: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
-    live_jobs = fetch_live_jobs()
+    live_jobs = fetch_live_jobs() or []
     print(f"Scouted {len(live_jobs)} live postings.")
     for job in live_jobs:
         process_scouted_job(job)
 
-# Execution Schedules
+def run_delayed_first_scout():
+    time.sleep(5)
+    run_job_scout_pipeline()
+
+# Schedules
 schedule.every(2).hours.do(run_job_scout_pipeline)
 schedule.every(30).days.do(AnalyticsAgent.generate_and_send_monthly_report)
 
 if __name__ == "__main__":
     print("=== AI Career Agent Unified Pipeline Active ===")
     
-    # 1. Start Keep-Alive Server Thread (Render 24/7)
-    threading.Thread(target=run_health_server, daemon=True).start()
-    
-    # 2. Start Telegram 1-Click Button Listener Thread
+    # 1. Telegram Listener Thread
     threading.Thread(target=start_telegram_listener, daemon=True).start()
     
-    # 3. Run first job scout round immediately
-    run_job_scout_pipeline()
+    # 2. Delayed Initial Scout Thread
+    threading.Thread(target=run_delayed_first_scout, daemon=True).start()
     
-    # 4. Continuous Loop
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    # 3. Scheduler Background Worker
+    def schedule_loop():
+        while True:
+            schedule.run_pending()
+            time.sleep(15)
+
+    threading.Thread(target=schedule_loop, daemon=True).start()
+
+    # 4. Main Thread binds Keep-Alive Web Server
+    run_health_server()
