@@ -1,0 +1,5 @@
+.env
+.venv
+playwright_user_data/
+career_agent.db
+__pycache__/

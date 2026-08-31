@@ -1,0 +1,8 @@
+google-genai
+pydantic
+python-dotenv
+requests
+python-dateutil
+schedule
+beautifulsoup4
+playwright
