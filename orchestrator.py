@@ -64,13 +64,14 @@ def send_heartbeat_status():
         total_tracked = stats.get("total_tracked_applications", 0)
         current_time = datetime.now().strftime("%I:%M %p | %d %b %Y")
         
+        # Purely positional arguments (No keyword arguments)
         send_telegram_alert(
-            company="System Monitor",
-            position="AI Agent Health Status",
-            match_score=100.0,
-            reason=f"🟢 Agent Online & Active 24/7.\n📊 Total Opportunities Logged: {total_tracked}\n⏰ Timestamp: {current_time}",
-            apply_link="https://harsh-ai-career-agent.onrender.com",
-            job_id="status_ping"
+            "System Monitor",
+            "AI Agent Health Status",
+            100.0,
+            f"🟢 Agent Online & Active 24/7.\n📊 Total Opportunities Logged: {total_tracked}\n⏰ Timestamp: {current_time}",
+            "https://harsh-ai-career-agent.onrender.com",
+            "status_ping"
         )
         print(f"[HEARTBEAT] Sent scheduled health alert to Telegram at {current_time}")
     except Exception as e:
@@ -80,8 +81,8 @@ def send_heartbeat_status():
 # 3. JOB PROCESSING PIPELINE
 # ==========================================
 def process_scouted_job(job: dict):
-    company = job["company"]
-    position = job["position"]
+    company = job.get("company", "Unknown")
+    position = job.get("position", "Unknown Role")
     apply_link = job.get("apply_link", "")
     description = job.get("description", "")
 
@@ -134,7 +135,15 @@ def process_scouted_job(job: dict):
                     role=eval_result.selected_role
                 )
                 print(f"[APPLIED VIA EMAIL] {company} - {position}")
-                send_telegram_alert(company, position, eval_result.match_score, f"Cold Email Sent to {recruiter_email} ✉️", apply_link, job_id)
+                # Positional call
+                send_telegram_alert(
+                    company,
+                    position,
+                    eval_result.match_score,
+                    f"Cold Email Sent to {recruiter_email} ✉️",
+                    apply_link,
+                    job_id
+                )
                 return
         except Exception as e:
             print(f"[EMAIL ERROR] {e}")
@@ -151,13 +160,14 @@ def process_scouted_job(job: dict):
         role=eval_result.selected_role
     )
     print(f"[MATCH FOUND] Alerting for {company} - {position}")
+    # Positional call (Fixed)
     send_telegram_alert(
-        company=company,
-        position=position,
-        match_score=eval_result.match_score,
-        reason=f"Top ATS Match ({eval_result.match_score}%) ⚡",
-        apply_link=apply_link,
-        job_id=job_id
+        company,
+        position,
+        eval_result.match_score,
+        f"Top ATS Match ({eval_result.match_score}%) ⚡",
+        apply_link,
+        job_id
     )
 
 def run_job_scout_pipeline():
