@@ -9,7 +9,7 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # 1. Applications Table (URL / Role unique to allow new company openings)
+    # 1. Applications Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS applications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,12 +20,12 @@ def init_db():
             applied_resume_role TEXT NOT NULL,
             match_score REAL NOT NULL,
             status TEXT NOT NULL,
-            job_url TEXT UNIQUE,
+            job_url TEXT,
             applied_at TIMESTAMP NOT NULL
         )
     ''')
     
-    # 2. Skill Gap Logs Table (Records missing skills for rejected/low-match jobs)
+    # 2. Skill Gap Logs Table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS skill_gap_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,26 +38,9 @@ def init_db():
     conn.commit()
     conn.close()
 
-def is_already_applied(company: str, position: str, job_url: str = "") -> bool:
-    """Checks strictly by unique URL first, then falls back to Company + Position match."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    if job_url:
-        clean_url = job_url.split("?")[0].strip()
-        cursor.execute("SELECT 1 FROM applications WHERE job_url = ?", (clean_url,))
-        exists = cursor.fetchone() is not None
-        if exists:
-            conn.close()
-            return True
-
-    cursor.execute(
-        "SELECT 1 FROM applications WHERE LOWER(company_name) = LOWER(?) AND LOWER(position) = LOWER(?)", 
-        (company.strip(), position.strip())
-    )
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
+def is_already_applied(company: str, position: str = "", job_url: str = "") -> bool:
+    """Duplicate filter disabled: Always returns False to allow every qualifying job."""
+    return False
 
 # Backward compatibility alias
 is_job_applied = is_already_applied
@@ -77,7 +60,7 @@ def log_application(
     cursor = conn.cursor()
     try:
         cursor.execute('''
-            INSERT OR IGNORE INTO applications (
+            INSERT INTO applications (
                 company_name, position, platform, contact_email, 
                 applied_resume_role, match_score, status, job_url, applied_at
             )
@@ -85,7 +68,7 @@ def log_application(
         ''', (company.strip(), position.strip(), platform, email, role, score, status, clean_url, datetime.now()))
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except Exception:
         return False
     finally:
         conn.close()
