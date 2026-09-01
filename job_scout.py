@@ -18,6 +18,10 @@ EXCLUDED_KEYWORDS = [
     "head", "staff", "vp", "architect", "expert", "specialist ii", "specialist iii"
 ]
 
+OLD_TIME_PATTERNS = [
+    "week", "weeks", "month", "months", "year", "years", "day ago", "days ago"
+]
+
 def extract_recruiter_email(description: str) -> str:
     if not description:
         return ""
@@ -32,6 +36,17 @@ def is_senior_role(title: str) -> bool:
     title_lower = title.lower()
     return any(re.search(rf"\b{re.escape(word)}\b", title_lower) for word in EXCLUDED_KEYWORDS)
 
+def is_posted_within_24h(card) -> bool:
+    """Verifies that the job card is not older than 24 hours."""
+    time_tag = card.find("time")
+    if not time_tag:
+        return True  # Fallback to API filter if no explicit time tag
+    time_text = time_tag.get_text(strip=True).lower()
+    for pattern in OLD_TIME_PATTERNS:
+        if pattern in time_text:
+            return False
+    return True
+
 def fetch_live_jobs() -> list:
     scouted_jobs = []
     headers = {
@@ -41,10 +56,11 @@ def fetch_live_jobs() -> list:
     }
 
     for query in TARGET_QUERIES:
-        print(f"[JOB SCOUT] Scanning Fresher/0-Exp openings for: {query}...")
+        print(f"[JOB SCOUT] Scanning Past 24h Fresher openings for: {query}...")
         encoded_query = urllib.parse.quote(query)
-        # f_E=1,2 targets Internship and Entry-Level filters on LinkedIn
-        url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={encoded_query}&location=India&f_E=1,2&sortBy=DD&start=0"
+        # f_TPR=r86400 restricts to past 24 hours (86,400 seconds)
+        # f_E=1,2 restricts to Internship and Entry-Level
+        url = f"https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords={encoded_query}&location=India&f_TPR=r86400&f_E=1,2&sortBy=DD&start=0"
         
         try:
             response = requests.get(url, headers=headers, timeout=20)
@@ -63,17 +79,20 @@ def fetch_live_jobs() -> list:
                 if not title_tag or not company_tag or not link_tag:
                     continue
 
+                # 1. Filter out jobs older than 24 hours
+                if not is_posted_within_24h(card):
+                    continue
+
                 position = title_tag.get_text(strip=True)
                 company = company_tag.get_text(strip=True)
                 raw_link = link_tag.get("href", "")
                 clean_link = raw_link.split("?")[0].strip()
 
-                # Filter out senior or experienced roles
+                # 2. Filter out senior or experienced roles
                 if is_senior_role(position):
-                    print(f"[JOB SCOUT EXCLUDED] Skipping experienced title: {position} at {company}")
                     continue
 
-                desc_text = f"Fresher opening for {position} at {company}. Skills: Python, SQL, Data Analytics, Machine Learning, PowerBI, Tableau, Data Cleaning, Statistics."
+                desc_text = f"Recent opening for {position} at {company}. Skills: Python, SQL, Data Analytics, Machine Learning, PowerBI, Tableau, Data Cleaning, Statistics."
                 recruiter_email = extract_recruiter_email(desc_text)
 
                 scouted_jobs.append({
@@ -87,5 +106,5 @@ def fetch_live_jobs() -> list:
         except Exception as e:
             print(f"[JOB SCOUT ERROR] {query}: {e}")
 
-    print(f"[JOB SCOUT COMPLETE] Total Fresher-Eligible Openings: {len(scouted_jobs)}")
+    print(f"[JOB SCOUT COMPLETE] Total <24h Fresher Openings: {len(scouted_jobs)}")
     return scouted_jobs
