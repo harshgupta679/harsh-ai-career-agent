@@ -56,7 +56,28 @@ def start_telegram_listener():
         print(f"[TELEGRAM CONTROLLER ERROR] {err}")
 
 # ==========================================
-# 2. JOB PROCESSING PIPELINE
+# 2. HEARTBEAT & HEALTH STATUS ALERTS
+# ==========================================
+def send_heartbeat_status():
+    try:
+        stats = database.get_monthly_stats()
+        total_tracked = stats.get("total_tracked_applications", 0)
+        current_time = datetime.now().strftime("%I:%M %p | %d %b %Y")
+        
+        send_telegram_alert(
+            company="System Monitor",
+            position="AI Agent Health Status",
+            match_score=100.0,
+            reason=f"🟢 Agent Online & Active 24/7.\n📊 Total Opportunities Logged: {total_tracked}\n⏰ Timestamp: {current_time}",
+            apply_link="https://harsh-ai-career-agent.onrender.com",
+            job_id="status_ping"
+        )
+        print(f"[HEARTBEAT] Sent scheduled health alert to Telegram at {current_time}")
+    except Exception as e:
+        print(f"[HEARTBEAT ERROR] {e}")
+
+# ==========================================
+# 3. JOB PROCESSING PIPELINE
 # ==========================================
 def process_scouted_job(job: dict):
     company = job["company"]
@@ -148,10 +169,13 @@ def run_job_scout_pipeline():
 
 def run_delayed_first_scout():
     time.sleep(5)
+    # Startup ping so you immediately know it's working
+    send_heartbeat_status()
     run_job_scout_pipeline()
 
 # Schedules
 schedule.every(2).hours.do(run_job_scout_pipeline)
+schedule.every().day.at("09:00").do(send_heartbeat_status)
 schedule.every(30).days.do(AnalyticsAgent.generate_and_send_monthly_report)
 
 if __name__ == "__main__":
@@ -160,7 +184,7 @@ if __name__ == "__main__":
     # 1. Telegram Listener Thread
     threading.Thread(target=start_telegram_listener, daemon=True).start()
     
-    # 2. Delayed Initial Scout Thread
+    # 2. Delayed Initial Scout & Startup Ping Thread
     threading.Thread(target=run_delayed_first_scout, daemon=True).start()
     
     # 3. Scheduler Background Worker
