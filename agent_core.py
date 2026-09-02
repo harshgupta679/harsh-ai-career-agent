@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -14,7 +15,7 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 EMAIL_APP_PASSWORD = os.getenv("EMAIL_APP_PASSWORD")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # Absolute paths for resumes
 RESUME_MAPPING = {
@@ -25,7 +26,7 @@ RESUME_MAPPING = {
 # --- Pydantic Schema for Structured Evaluation ---
 class EvaluationSchema(BaseModel):
     match_score: float = Field(description="ATS match score from 0 to 100")
-    apply_verdict: bool = Field(description="True if score >= 65, else False")
+    apply_verdict: bool = Field(description="True if fresher-eligible and match_score >= 65, else False")
     selected_role: str = Field(description="'Data Analyst' or 'Data Scientist'")
     missing_skills: list[str] = Field(description="List of skills the candidate lacks")
 
@@ -45,21 +46,42 @@ class MatchmakerAgent:
     @staticmethod
     def evaluate_job(position: str, description: str) -> EvaluationSchema:
         time.sleep(2)  # Rate-limit buffer
+        
+        # Pre-check for strict Senior / Experienced exclusions
+        pos_lower = position.lower()
+        desc_lower = description.lower()
+        senior_terms = ["senior", "sr.", "lead", "principal", "manager", "director", "head", "staff", "vp", "architect"]
+        
+        if any(term in pos_lower for term in senior_terms):
+            print(f"[MATCHER EXCLUSION] Skipping Senior/Lead role: {position}")
+            return EvaluationSchema(
+                match_score=0.0,
+                apply_verdict=False,
+                selected_role="Data Analyst",
+                missing_skills=["Senior / Lead experience not matched"]
+            )
+
         try:
             client = genai.Client(api_key=GEMINI_API_KEY)
             prompt = f"""
-Evaluate candidate Harsh Gupta against this job opening.
+You are an expert Technical Recruiter evaluating candidate Harsh Gupta strictly for FRESHER / ENTRY-LEVEL job openings.
 
 Candidate Profile:
-- Strong hands-on background in Data Analytics, Python, SQL, Machine Learning, PowerBI/Tableau, and AI Agents.
-- Resumes Available: Data Analyst & Data Scientist.
+- Experience Level: 0 Years (Fresh Graduate / College Student / Fresher / Intern)
+- Skills: Data Analytics, Python, SQL, Machine Learning, PowerBI/Tableau, Generative AI & Automation.
+- Target Roles: Data Analyst, Data Scientist, Junior / Entry-Level / Intern roles.
 
-Target Role: {position}
+Target Position: {position}
 Job Description: {description}
 
-Analyze match and return JSON strictly matching schema:
+STRICT REJECTION RULES (MANDATORY):
+1. If the job explicitly demands 1+ years, 2+ years, 3+ years or higher full-time industry experience, REJECT IT IMMEDIATELY (match_score = 0, apply_verdict = false).
+2. If the role is for Senior, Lead, Manager, or Experienced professionals, REJECT IT IMMEDIATELY (apply_verdict = false).
+3. ONLY approve (apply_verdict = true) if the position is open for Freshers, 0 Years Experience, Interns, College Graduates, Trainees, or Junior/Entry-Level candidates AND the technical ATS match is >= 65%.
+
+Output JSON matching schema:
 - match_score: 0 to 100
-- apply_verdict: true if match_score >= 65 else false
+- apply_verdict: true if fresher-eligible AND score >= 65, else false
 - selected_role: 'Data Analyst' or 'Data Scientist'
 - missing_skills: list of missing tools/skills
 """
@@ -72,19 +94,32 @@ Analyze match and return JSON strictly matching schema:
                 }
             )
             return EvaluationSchema.model_validate_json(response.text)
+
         except Exception as e:
             print(f"[GEMINI EVAL ADAPTIVE] Fallback scoring applied: {e}")
-            # Algorithmic fallback to prevent pipeline crash when API limits are reached
-            text = (position + " " + description).lower()
+            
+            # Algorithmic fallback with strict Fresher check
+            exp_patterns = [r"\b[1-9]\d*\s*\+?\s*years?\b", r"\b[2-9]\s*to\s*\d+\s*years?\b"]
+            has_high_exp = any(re.search(pat, desc_lower) for pat in exp_patterns)
+            
+            if has_high_exp and "intern" not in pos_lower and "fresher" not in desc_lower:
+                return EvaluationSchema(
+                    match_score=0.0,
+                    apply_verdict=False,
+                    selected_role="Data Analyst",
+                    missing_skills=["Requires Prior Industry Experience"]
+                )
+
             keywords = ["python", "sql", "analyst", "data", "tableau", "power bi", "machine learning", "ml"]
-            matches = sum(1 for k in keywords if k in text)
-            score = min(90.0, 52.0 + (matches * 6.0))
-            is_ds = any(k in text for k in ["scientist", "machine learning", "ml", "ai"])
+            matches = sum(1 for k in keywords if k in desc_lower or k in pos_lower)
+            score = min(88.0, 50.0 + (matches * 6.0))
+            is_ds = any(k in pos_lower or k in desc_lower for k in ["scientist", "machine learning", "ml", "ai"])
+            
             return EvaluationSchema(
                 match_score=score,
                 apply_verdict=(score >= 65.0),
                 selected_role="Data Scientist" if is_ds else "Data Analyst",
-                missing_skills=["Cloud Architecture (AWS/GCP)"] if score < 75 else []
+                missing_skills=["Advanced BI Tooling"] if score < 75 else []
             )
 
 
@@ -105,15 +140,15 @@ Job Description / Core Requirements:
 
 Candidate Profile (Harsh Gupta):
 - Expertise: Data Analytics, Python, SQL, Machine Learning, Tableau/PowerBI, LLMs/Agentic Workflows.
-- Value Proposition: Strong foundation in building production-ready data pipelines, actionable dashboards, and applied AI automation.
+- Background: Motivated fresher with hands-on project experience in data analytics pipelines, dashboards, and machine learning models.
 - Contact: harshgupta06504@gmail.com | LinkedIn: https://www.linkedin.com/in/harshgupta679
 
 Email Writing Guidelines:
-1. Subject Line: Must be clean and corporate (e.g., "Application for {position} - Harsh Gupta").
-2. Tone: Confident, polite, concise (under 160 words). No robotic/overly formal cliches.
-3. Paragraph 1: State interest in the specific {position} role at {company} and alignment with their core stack.
-4. Paragraph 2: Mention 2-3 specific technical capabilities directly addressing requirements.
-5. Paragraph 3: Mention attached resume and suggest a brief connect.
+1. Subject Line: Clean corporate format (e.g., "Application for {position} - Harsh Gupta").
+2. Tone: Confident, enthusiastic fresher, polite, concise (under 150 words).
+3. Paragraph 1: Mention passion for the {position} role at {company}.
+4. Paragraph 2: Highlight core skills (Python, SQL, {role_type} tools) and readiness to deliver immediate value.
+5. Paragraph 3: Mention attached resume and express enthusiasm for a brief conversation.
 6. Signature: Corporate clean format.
 
 Output STRICTLY in this format:
@@ -136,7 +171,7 @@ BODY:
         except Exception:
             return {
                 "subject": f"Application for {position} - Harsh Gupta",
-                "body": f"Hi Hiring Team,\n\nI am applying for the {position} role at {company}. With hands-on expertise in Python, SQL, data modeling, and {role_type} workflows, I look forward to adding immediate value to your data initiatives.\n\nPlease find my resume attached for review.\n\nBest regards,\nHarsh Gupta\nharshgupta06504@gmail.com"
+                "body": f"Hi Hiring Team,\n\nI am excited to submit my application for the {position} role at {company}. As a passionate fresher with strong practical skills in Python, SQL, data analysis, and {role_type} methodologies, I am eager to contribute to your data initiatives.\n\nPlease find my resume attached for your review. I would welcome the opportunity to discuss how my skill set aligns with your team's goals.\n\nBest regards,\nHarsh Gupta\nharshgupta06504@gmail.com"
             }
 
     @staticmethod
